@@ -1,4 +1,21 @@
-"""Prompt generation for the customer agent."""
+"""Prompt generation for the customer agent.
+
+カスタマーエージェント用のプロンプト生成モジュール
+------------------------------------------------------
+このモジュールは、カスタマーエージェントがLLMと対話するための
+プロンプトを動的に生成します。プロンプトエンジニアリングの核心部分です。
+
+主な役割:
+1. システムプロンプトの生成 - エージェントの役割と利用可能なアクションを定義
+2. 状態コンテキストの生成 - 現在の会話履歴と過去のアクション結果を整形
+3. ステップごとのプロンプト - 次に取るべきアクションを促す指示を生成
+
+プロンプトエンジニアリングの戦略:
+- Few-shot learning: 過去のアクション結果を会話履歴として提示
+- Structured output: Pydanticモデルを使ってLLMの出力を構造化
+- Chain-of-thought: アクションの理由(reason)を明示的に要求
+- Role-playing: エージェントを「自律的なアシスタント」として設定
+"""
 
 from typing import cast
 
@@ -16,7 +33,20 @@ from .models import (
 
 
 class PromptsHandler:
-    """Handles prompt generation for the customer agent."""
+    """Handles prompt generation for the customer agent.
+
+    カスタマーエージェントのプロンプト生成ハンドラー
+    ------------------------------------------------
+    このクラスは、エージェントの状態を管理し、LLMへのプロンプトを
+    動的に構築する責任を持ちます。
+
+    プロンプトの構成要素:
+    1. システムプロンプト: エージェントの役割、利用可能なツール、戦略を定義
+    2. 状態コンテキスト: 過去のアクション履歴と現在の状態を提示
+    3. ステッププロンプト: 次のアクションを促す具体的な指示
+
+    これらを組み合わせて、LLMが適切な CustomerAction を生成できるように導きます。
+    """
 
     def __init__(
         self,
@@ -36,6 +66,12 @@ class PromptsHandler:
             event_history: Event history for conversation formatting
             logger: Logger instance
 
+        プロンプト生成に必要な状態情報:
+        - customer: 顧客の要望と支払い意思額を含む
+        - proposal_storage: 受け取った提案を追跡
+        - completed_transactions: 完了した取引のID
+        - event_history: 過去のアクションと結果のペア（Few-shot learning用）
+
         """
         self.customer = customer
         self.proposal_storage = proposal_storage
@@ -45,6 +81,23 @@ class PromptsHandler:
 
     def format_system_prompt(self) -> str:
         """Format the system prompt for customer agent decision making.
+
+        システムプロンプトの生成
+        ----------------------
+        LLMにエージェントの「役割」を教える最も重要なプロンプト。
+        以下の要素を含む:
+
+        1. 役割定義: 「あなたは顧客のために働く自律エージェントです」
+        2. 制約: 顧客に直接アクセスできず、ツールのみ使用可能
+        3. 利用可能なツール: search_businesses, send_messages, check_messages, end_transaction
+        4. 戦略ガイド: ショッピングの7ステップ（理解→検索→問い合わせ→提案待ち→比較→支払い→確認）
+        5. 重要なルール: テキストメッセージで質問、支払いメッセージで提案受諾
+
+        プロンプトエンジニアリングのポイント:
+        - Role-playing: エージェントに明確な役割を与えることで、一貫した行動を促す
+        - Constraint specification: できないことを明示して、無効なアクションを防ぐ
+        - Step-by-step guidance: 複雑なタスクを段階的に分解して提示
+        - Emphasis: 重要なルールを大文字や繰り返しで強調
 
         Returns:
             Formatted system prompt
@@ -88,8 +141,26 @@ IMPORTANT: You do NOT have access to the customer directly. You must fulfill the
     def format_state_context(self) -> tuple[str, int]:
         """Format the current state context for the agent.
 
+        状態コンテキストの生成
+        --------------------
+        エージェントの過去のアクション履歴を整形してLLMに提示します。
+        これにより、LLMは以前の行動を参照して次のアクションを決定できます。
+
+        Few-shot learningの実装:
+        - event_history から過去のアクションと結果のペアを取得
+        - 各ステップを「STEP N」形式で整形
+        - アクションの種類に応じて異なるフォーマットを適用
+        - 成功/失敗のフィードバックを含める（絵文字で視覚的に強調）
+
+        これにより、LLMは:
+        1. 何を試したか（search, check_messages, send_messages）
+        2. 結果がどうだったか（成功、失敗、メッセージ受信など）
+        3. 現在どの段階にいるか
+        を理解できます。
+
         Returns:
             Formatted state context and integer step counter
+            フォーマット済みの会話履歴と現在のステップ番号
 
         """
         # Format available proposals with IDs
@@ -118,6 +189,19 @@ IMPORTANT: You do NOT have access to the customer directly. You must fulfill the
     def format_step_prompt(self, last_step: int) -> str:
         """Format the step prompt for the current decision.
 
+        ステッププロンプトの生成
+        ----------------------
+        次に取るべきアクションを促す具体的な指示を生成します。
+
+        プロンプトエンジニアリングの工夫:
+        1. ステップ番号を明示: "Step N" として進行状況を明確化
+        2. アクションのリマインダー: text/pay/check_messagesの使い分けを再度説明
+        3. 重要なルール: proposal_id = message_id の関係を強調
+        4. 行動を促す: "Choose your action carefully" で慎重な判断を促す
+
+        このプロンプトは状態コンテキストの後に追加され、
+        LLMに「今すぐアクションを選択せよ」と指示します。
+
         Returns:
             Formatted step prompt
 
@@ -132,7 +216,28 @@ Choose your action carefully.
 """
 
     def format_event_history(self):
-        """Format the event history for the prompt."""
+        """Format the event history for the prompt.
+
+        イベント履歴の整形
+        ----------------
+        過去のすべてのアクションと結果を時系列で整形します。
+
+        Few-shot learningの核心部分:
+        - event_history は (CustomerAction, CustomerActionResult) のタプルまたはエラー文字列
+        - 各イベントを「例」として提示することで、LLMに正しい行動パターンを学習させる
+        - ステップ番号を付けることで、タスクの進行状況を明確化
+
+        例えば:
+        === STEP 1 ===
+        Action: search_businesses: {"search_query": "Mexican restaurants"}
+        Result: Found 9 businesses...
+
+        === STEP 2 ===
+        Action: check_messages
+        Result: No new messages
+
+        このような履歴により、LLMは「検索→メッセージ確認→送信」のパターンを学習します。
+        """
         lines: list[str] = []
         step_number = 0
 

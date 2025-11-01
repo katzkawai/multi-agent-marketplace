@@ -1,4 +1,51 @@
-"""Gemini model client implementation."""
+"""Gemini model client implementation.
+
+Geminiクライアントの実装
+=======================
+
+このモジュールは、Google Gemini API（Gemini 1.5、Gemini 2.0シリーズなど）への
+統合を提供します。OpenAI互換のインターフェースを維持しながら、Gemini固有の機能
+（thinking mode、ネイティブJSON出力）をサポートします。
+
+主な機能:
+- Google Gemini APIへの非同期接続
+- OpenAI形式のメッセージをGemini形式に自動変換
+- 構造化出力生成（response_schemaを使用）
+- Thinking mode（推論モード）のサポート
+- 自動リトライ機能（最大3回）
+- トークン使用量のトラッキング
+- クライアントインスタンスのキャッシング
+
+重要な違い:
+- Systemメッセージはsystem_instructionパラメータに配置
+- Assistant roleは "model" roleに変換される
+- 構造化出力はresponse_schemaとresponse_mime_typeで制御
+- Thinking modeではthinking_budgetで推論トークン数を指定
+
+使用例:
+    from magentic_marketplace.marketplace.llm.clients.gemini import GeminiClient
+
+    # 環境変数から設定を読み込んで初期化
+    client = GeminiClient()
+
+    # テキスト生成
+    text, usage = await client.generate(
+        model="gemini-2.0-flash-exp",
+        messages=[{"role": "user", "content": "こんにちは"}],
+        temperature=0.7
+    )
+
+    # 構造化出力生成
+    from pydantic import BaseModel
+    class Response(BaseModel):
+        answer: str
+
+    response, usage = await client.generate(
+        model="gemini-2.0-flash-exp",
+        messages=[{"role": "user", "content": "質問"}],
+        response_format=Response
+    )
+"""
 
 import json
 import threading
@@ -20,7 +67,23 @@ from ..config import BaseLLMConfig, EnvField
 
 
 class GeminiConfig(BaseLLMConfig):
-    """Configuration for Gemini provider."""
+    """Configuration for Gemini provider.
+
+    Geminiプロバイダーの設定クラス
+    =============================
+
+    Google Gemini APIに接続するための設定を管理します。
+    環境変数から自動的に値を読み込みます。
+
+    環境変数:
+        LLM_PROVIDER: プロバイダー名（デフォルト: "gemini"）
+        GEMINI_API_KEY: Google AI Studio APIキー（必須）
+
+    Attributes:
+        provider: プロバイダー識別子（"gemini"に固定）
+        api_key: Gemini APIキー
+
+    """
 
     provider: Literal["gemini"] = EnvField("LLM_PROVIDER", default="gemini")  # pyright: ignore[reportIncompatibleVariableOverride]
     api_key: str = EnvField("GEMINI_API_KEY", exclude=True)
@@ -338,10 +401,26 @@ class GeminiClient(ProviderClient[GeminiConfig]):
     ) -> tuple[list[google.genai.types.Content], str | None]:
         """Convert OpenAI messages to Gemini Content format.
 
+        OpenAI形式のメッセージをGemini形式に変換
+        ========================================
+
+        OpenAI APIとGemini APIの主な違いを吸収します：
+        1. Systemメッセージは会話履歴から分離され、system_promptとして返される
+        2. "assistant"ロールは"model"ロールに変換される
+        3. メッセージはContent/Partオブジェクトに変換される
+        4. マルチパートコンテンツをテキストのみ抽出して結合
+
+        Args:
+            messages: OpenAI形式のメッセージシーケンス
+
         Returns:
-            A tuple of (contents, system_prompt) where contents is the list of
-            Content objects and system_prompt is the concatenated system messages
-            or None if there are no system messages.
+            tuple[list[Content], str | None]:
+                - contents: Gemini形式のContentオブジェクトリスト（systemメッセージを除く）
+                - system_prompt: 連結されたsystemメッセージ、または存在しない場合はNone
+
+        Note:
+            Gemini APIでは、systemメッセージは会話履歴の一部ではなく、
+            別個の system_instruction パラメータとして API に渡されます。
 
         """
         gemini_contents: list[google.genai.types.Content] = []
@@ -354,11 +433,11 @@ class GeminiClient(ProviderClient[GeminiConfig]):
             if not content:
                 continue
 
-            # Handle different content types
+            # 異なるコンテンツタイプの処理
             if isinstance(content, str):
                 text_content = content
             elif isinstance(content, list):
-                # Handle multi-part content
+                # マルチパートコンテンツの処理
                 text_parts: list[str] = []
                 for part in content:
                     if part["type"] == "text":
@@ -370,11 +449,12 @@ class GeminiClient(ProviderClient[GeminiConfig]):
             if not text_content:
                 continue
 
-            # Convert roles: OpenAI "assistant" -> Gemini "model", "user" stays "user"
-            # Collect system messages separately
+            # ロールの変換: OpenAI "assistant" -> Gemini "model", "user" はそのまま
+            # Systemメッセージは別に収集
             if role == "system":
                 system_messages.append(text_content)
             elif role == "assistant":
+                # AssistantロールはGeminiの"model"ロールにマッピング
                 gemini_contents.append(
                     google.genai.types.Content(
                         role="model", parts=[google.genai.types.Part(text=text_content)]
@@ -387,7 +467,7 @@ class GeminiClient(ProviderClient[GeminiConfig]):
                     )
                 )
 
-        # Concatenate system messages or return None
+        # Systemメッセージを連結、または存在しない場合はNoneを返す
         system_prompt = "\n\n".join(system_messages) if system_messages else None
 
         return gemini_contents, system_prompt

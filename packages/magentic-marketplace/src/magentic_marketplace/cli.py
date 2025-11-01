@@ -1,4 +1,44 @@
-"""Command-line interface for magentic-marketplace."""
+"""Command-line interface for magentic-marketplace.
+
+Magentic Marketplaceコマンドラインインターフェース
+================================================
+
+このモジュールは、Magentic Marketplaceの主要なCLIエントリーポイントを提供します。
+エージェント市場シミュレーションの実行、分析、可視化などの操作を
+コマンドラインから実行できます。
+
+利用可能なコマンド:
+    run             - マーケットプレイス実験を実行
+    analyze         - 実験結果を分析して統計を生成
+    extract-traces  - LLMトレースをマークダウンファイルに抽出
+    audit           - 実験の整合性を検証（提案配信など）
+    export          - PostgreSQL実験をSQLiteファイルにエクスポート
+    list            - PostgreSQLに保存されている全実験を一覧表示
+    ui              - インタラクティブな可視化UIを起動
+
+基本的な使用方法:
+    # 実験を実行
+    magentic-marketplace run data/mexican_3_9 --experiment-name test_exp
+
+    # 結果を分析
+    magentic-marketplace analyze test_exp
+
+    # UI で可視化
+    magentic-marketplace ui test_exp
+
+    # SQLite にエクスポート
+    magentic-marketplace export test_exp -o ./exports
+
+環境設定:
+    .envファイルまたは環境変数で以下を設定:
+    - LLM_PROVIDER: "openai", "anthropic", "gemini" のいずれか
+    - LLM_MODEL: 使用するモデル名
+    - OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY: APIキー
+    - POSTGRES_HOST, POSTGRES_PORT, POSTGRES_PASSWORD: PostgreSQL接続情報
+
+詳細なヘルプ:
+    magentic-marketplace <command> --help
+"""
 
 import argparse
 import asyncio
@@ -20,25 +60,61 @@ from magentic_marketplace.experiments.run_experiment import run_marketplace_expe
 from magentic_marketplace.experiments.utils import setup_logging
 from magentic_marketplace.ui import run_ui_server
 
-DEFAULT_POSTGRES_PORT = 5432
-DEFAULT_UI_PORT = 5000
+# デフォルト設定
+DEFAULT_POSTGRES_PORT = 5432  # PostgreSQLのデフォルトポート
+DEFAULT_UI_PORT = 5000  # 可視化UIのデフォルトポート
 
 
 def run_experiment_command(args):
-    """Handle the experiment subcommand."""
-    # Setup logging
+    """Handle the experiment subcommand.
+
+    実験実行コマンドのハンドラー
+    ===========================
+
+    マーケットプレイス実験を実行します。以下の手順で動作します：
+    1. YAMLファイルからビジネスと顧客エージェントをロード
+    2. PostgreSQLデータベーススキーマを作成（またはオーバーライド）
+    3. FastAPIベースのマーケットプレイスサーバーを起動
+    4. 全エージェントを登録
+    5. シミュレーションを実行
+    6. オプションでSQLiteにエクスポート
+
+    データディレクトリ構造:
+        data_dir/
+        ├── businesses/
+        │   ├── business_001.yaml
+        │   ├── business_002.yaml
+        │   └── ...
+        └── customers/
+            ├── customer_001.yaml
+            ├── customer_002.yaml
+            └── ...
+
+    各YAMLファイルの形式:
+        Business: id, name, description, rating, menu_features, amenity_features
+        Customer: id, name, request, menu_features, amenity_features
+
+    Args:
+        args: argparseからの引数オブジェクト（コマンドライン引数を含む）
+
+    Note:
+        実験結果はPostgreSQLに保存され、後で分析や可視化が可能です。
+        --exportフラグを使用すると、実験完了後に自動的にSQLiteファイルにエクスポートされます。
+
+    """
+    # ロギングのセットアップ
     setup_logging()
     logger = logging.getLogger(__name__)
 
-    # Set logging level if provided
+    # ログレベルが指定されている場合は設定
     if hasattr(args, "log_level"):
         numeric_level = getattr(logging, args.log_level.upper())
         logging.getLogger().setLevel(numeric_level)
 
-    # Convert paths to Path objects
+    # パスをPathオブジェクトに変換
     data_dir = Path(args.data_dir)
 
-    # Validate data directory structure
+    # データディレクトリ構造の検証
     if not data_dir.exists():
         logger.error(f"Data directory does not exist: {data_dir}")
         sys.exit(1)
@@ -54,7 +130,8 @@ def run_experiment_command(args):
         logger.error(f"Customers directory does not exist: {customers_dir}")
         sys.exit(1)
 
-    # Try load .env
+    # .envファイルの読み込み試行
+    # LLM APIキーやPostgreSQL接続情報などの環境変数を取得
     env_file = getattr(args, "env_file", ".env")
     did_load_env = load_dotenv(env_file)
     if did_load_env:
@@ -64,6 +141,7 @@ def run_experiment_command(args):
             f"No environment variables loaded from env file at path: {env_file}"
         )
 
+    # 実験の概要をログ出力
     logger.info(
         "Marketplace Experiment Runner\n"
         "This experiment will:\n"
@@ -75,7 +153,7 @@ def run_experiment_command(args):
         "6. Run the marketplace simulation\n"
     )
 
-    # Run the experiment
+    # 実験を実行（非同期関数をasyncio.runで実行）
     asyncio.run(
         run_marketplace_experiment(
             data_dir=data_dir,
@@ -99,7 +177,28 @@ def run_experiment_command(args):
 
 
 def run_analysis_command(args):
-    """Handle the analytics subcommand."""
+    """Handle the analytics subcommand.
+
+    分析コマンドのハンドラー
+    =======================
+
+    実験結果を分析して、市場効率性の統計情報を生成します。
+
+    分析内容:
+    - 顧客効用の計算（マッチスコア - 支払い総額）
+    - ビジネス効用の計算（収益総額）
+    - 市場厚生の計算（全顧客効用の合計）
+    - 無効な提案の追跡（誤ったメニュー項目、価格エラーなど）
+    - ファジーマッチング（Levenshtein距離を使用したタイポの許容）
+
+    出力:
+    - analytics_results_<name>.json ファイル（--no-save-json フラグで無効化可能）
+    - コンソールへの統計情報の表示
+
+    Args:
+        args: argparseからの引数オブジェクト
+
+    """
     save_to_json = not args.no_save_json
     asyncio.run(
         run_analytics(
@@ -113,18 +212,66 @@ def run_analysis_command(args):
 
 
 def run_extract_traces_command(args):
-    """Handle the extract-traces subcommand."""
+    """Handle the extract-traces subcommand.
+
+    LLMトレース抽出コマンドのハンドラー
+    ==================================
+
+    実験中の全LLM呼び出しをマークダウンファイルに抽出します。
+    各エージェントのプロンプト、応答、トークン使用量などの詳細を含みます。
+
+    出力:
+    - エージェントごとのマークダウンファイル
+    - プロンプト、応答、トークン使用量、レイテンシなどの詳細
+
+    Args:
+        args: argparseからの引数オブジェクト
+
+    """
     asyncio.run(run_extract_traces(args.database_name, args.db_type))
 
 
 def run_audit_command(args):
-    """Handle the audit subcommand."""
+    """Handle the audit subcommand.
+
+    監査コマンドのハンドラー
+    =======================
+
+    実験の整合性を検証します。主に以下をチェック:
+    - 顧客が全てのビジネス提案を受信したか
+    - メッセージ配信の完全性
+    - プロトコル違反の有無
+
+    出力:
+    - audit_results_<name>.json ファイル（--no-save-json フラグで無効化可能）
+    - コンソールへの検証結果の表示
+
+    Args:
+        args: argparseからの引数オブジェクト
+
+    """
     save_to_json = not args.no_save_json
     asyncio.run(run_audit(args.database_name, args.db_type, save_to_json=save_to_json))
 
 
 def list_experiments_command(args):
-    """Handle the list-experiments subcommand."""
+    """Handle the list-experiments subcommand.
+
+    実験一覧コマンドのハンドラー
+    ===========================
+
+    PostgreSQLデータベースに保存されている全ての実験を一覧表示します。
+
+    表示情報:
+    - 実験名（スキーマ名）
+    - 最終更新日時
+    - エージェント数
+    - アクション数
+
+    Args:
+        args: argparseからの引数オブジェクト
+
+    """
     asyncio.run(
         list_experiments(
             host=args.postgres_host,
@@ -138,7 +285,27 @@ def list_experiments_command(args):
 
 
 def run_export_command(args):
-    """Handle the export subcommand."""
+    """Handle the export subcommand.
+
+    エクスポートコマンドのハンドラー
+    ===============================
+
+    PostgreSQL実験をSQLiteファイルにエクスポートします。
+    これにより、ポータブルな分析やオフライン可視化が可能になります。
+
+    エクスポート内容:
+    - agents テーブル
+    - actions テーブル
+    - logs テーブル
+
+    出力:
+    - <experiment_name>.db SQLiteファイル（デフォルト）
+    - カスタムディレクトリと ファイル名をオプションで指定可能
+
+    Args:
+        args: argparseからの引数オブジェクト
+
+    """
     asyncio.run(
         export_experiment(
             experiment_name=args.experiment_name,
@@ -153,7 +320,27 @@ def run_export_command(args):
 
 
 def run_ui_command(args):
-    """Handle the UI subcommand to launch the visualizer."""
+    """Handle the UI subcommand to launch the visualizer.
+
+    UI起動コマンドのハンドラー
+    =========================
+
+    インタラクティブなWeb可視化UIを起動します。
+
+    機能:
+    - エージェント間のインタラクションの可視化
+    - メッセージフローの追跡
+    - 統計情報のグラフ表示
+    - LLMトレースの閲覧
+
+    アクセス:
+    - デフォルト: http://localhost:5000
+    - カスタムホスト/ポートをオプションで指定可能
+
+    Args:
+        args: argparseからの引数オブジェクト
+
+    """
     run_ui_server(
         database_name=args.database_name,
         db_type=args.db_type,
@@ -166,23 +353,59 @@ def run_ui_command(args):
 
 
 def main():
-    """Run main CLI."""
+    """Run main CLI.
+
+    メインCLIエントリーポイント
+    =========================
+
+    このメソッドは、コマンドライン引数をパースし、適切なサブコマンドハンドラーを
+    実行します。全てのCLI操作のエントリーポイントとして機能します。
+
+    サブコマンド構造:
+    - run: 実験実行
+    - analyze: 結果分析
+    - extract-traces: LLMトレース抽出
+    - audit: 整合性検証
+    - export: PostgreSQL → SQLite エクスポート
+    - list: 実験一覧
+    - ui: 可視化UI起動
+
+    各サブコマンドは独自の引数セットを持ち、対応するハンドラー関数を実行します。
+
+    実行フロー:
+    1. argparseでコマンドライン引数をパース
+    2. サブコマンドに基づいてハンドラー関数を選択
+    3. ハンドラー関数を実行
+    4. エラーハンドリング（KeyboardInterrupt、一般的な例外）
+
+    Note:
+        このメソッドは pyproject.toml の [project.scripts] セクションで
+        'magentic-marketplace' コマンドとして登録されています。
+
+    """
     parser = argparse.ArgumentParser(
         prog="magentic-marketplace",
         description="Magentic Marketplace - Python SDK for building and running agentic marketplace simulations",
     )
 
-    # Add subcommands
+    # サブコマンドの追加
+    # 各サブコマンドは独自のパーサーと引数セットを持つ
     subparsers = parser.add_subparsers(
         dest="command", help="Available commands", required=True
     )
 
-    # experiment subcommand
+    # =================================================================
+    # RUN サブコマンド - 実験実行
+    # =================================================================
+    # マーケットプレイス実験を実行するためのサブコマンド
+    # YAMLファイルからエージェントを読み込み、シミュレーションを実行
     experiment_parser = subparsers.add_parser(
         "run", help="Run a marketplace experiment using YAML configuration files"
     )
     experiment_parser.set_defaults(func=run_experiment_command)
 
+    # 必須引数：データディレクトリ
+    # businesses/ と customers/ サブディレクトリを含む必要がある
     experiment_parser.add_argument(
         "data_dir",
         type=str,
@@ -299,7 +522,11 @@ def main():
         help="Output filename for SQLite export (default: <experiment_name>.db). Only used with --export.",
     )
 
-    # analytics subcommand
+    # =================================================================
+    # ANALYZE サブコマンド - 結果分析
+    # =================================================================
+    # 実験結果を分析して市場効率性の統計を生成
+    # 顧客効用、ビジネス効用、市場厚生などを計算
     analytics_parser = subparsers.add_parser(
         "analyze", help="Analyze marketplace simulation data"
     )
@@ -329,7 +556,11 @@ def main():
         help="Maximum Levenshtein distance for fuzzy item name matching (default: 0)",
     )
 
-    # extract-traces subcommand
+    # =================================================================
+    # EXTRACT-TRACES サブコマンド - LLMトレース抽出
+    # =================================================================
+    # 実験中の全LLM呼び出しをマークダウンファイルに抽出
+    # デバッグやプロンプト最適化に有用
     extract_traces_parser = subparsers.add_parser(
         "extract-traces",
         help="Extract LLM traces from marketplace simulation and save to markdown files",
@@ -347,7 +578,11 @@ def main():
         help="Type of database to use (default: postgres)",
     )
 
-    # audit subcommand
+    # =================================================================
+    # AUDIT サブコマンド - 整合性検証
+    # =================================================================
+    # 実験の整合性を検証（全提案が配信されたかなど）
+    # プロトコル違反や配信エラーを検出
     audit_parser = subparsers.add_parser(
         "audit",
         help="Audit marketplace simulation to verify customers received all proposals",
@@ -371,7 +606,11 @@ def main():
         help="Disable saving audit results to JSON file",
     )
 
-    # export subcommand
+    # =================================================================
+    # EXPORT サブコマンド - PostgreSQL → SQLite エクスポート
+    # =================================================================
+    # PostgreSQL実験をポータブルなSQLiteファイルにエクスポート
+    # オフライン分析や共有に便利
     export_parser = subparsers.add_parser(
         "export",
         help="Export a PostgreSQL experiment to SQLite database file",
@@ -422,7 +661,11 @@ def main():
         help="PostgreSQL password (default: POSTGRES_PASSWORD env var or postgres)",
     )
 
-    # list-experiments subcommand
+    # =================================================================
+    # LIST サブコマンド - 実験一覧
+    # =================================================================
+    # PostgreSQLに保存されている全実験を一覧表示
+    # 実験の管理と選択に便利
     list_experiments_parser = subparsers.add_parser(
         "list",
         help="List all marketplace experiments stored in PostgreSQL",
@@ -467,7 +710,11 @@ def main():
         help="Maximum number of experiments to display",
     )
 
-    # ui subcommand
+    # =================================================================
+    # UI サブコマンド - 可視化UI起動
+    # =================================================================
+    # インタラクティブなWeb UIを起動して実験結果を可視化
+    # エージェントのインタラクション、統計、LLMトレースなどを閲覧
     ui_parser = subparsers.add_parser(
         "ui", help="Launch interactive visualizer for marketplace data"
     )
@@ -517,18 +764,27 @@ def main():
         help=f"Port for ui server(default: {DEFAULT_UI_PORT})",
     )
 
-    # Parse arguments and execute the appropriate function
+    # =================================================================
+    # 引数のパースと実行
+    # =================================================================
+    # コマンドライン引数をパースし、対応するハンドラー関数を実行
     args = parser.parse_args()
 
     try:
+        # 各サブコマンドに設定された func を呼び出し
+        # set_defaults(func=...) で設定されたハンドラー関数を実行
         args.func(args)
     except KeyboardInterrupt:
+        # ユーザーによる中断（Ctrl+C）
         print("\nExecution interrupted by user.")
         sys.exit(1)
     except Exception as e:
+        # その他のエラー
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
 if __name__ == "__main__":
+    # スクリプトとして直接実行された場合のエントリーポイント
+    # 通常は 'magentic-marketplace' コマンドから呼び出される
     main()
